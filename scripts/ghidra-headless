@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Launch this tree's analyzeHeadless with a Java 21 JDK.
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+GHIDRA_HOME="${GHIDRA_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+
+if [[ -z "${JAVA_HOME:-}" ]]; then
+	if command -v brew >/dev/null 2>&1; then
+		prefix=$(brew --prefix openjdk@21 2>/dev/null || true)
+		if [[ -n "$prefix" && -x "$prefix/libexec/openjdk.jdk/Contents/Home/bin/java" ]]; then
+			JAVA_HOME="$prefix/libexec/openjdk.jdk/Contents/Home"
+		fi
+	fi
+fi
+
+if [[ -z "${JAVA_HOME:-}" || ! -x "$JAVA_HOME/bin/java" ]]; then
+	echo "Java 21 not found. Install it and set JAVA_HOME, for example:" >&2
+	echo "  brew install openjdk@21" >&2
+	echo "  export JAVA_HOME=\"\$(brew --prefix openjdk@21)/libexec/openjdk.jdk/Contents/Home\"" >&2
+	exit 1
+fi
+
+export JAVA_HOME
+export PATH="$JAVA_HOME/bin:$PATH"
+
+exec "$GHIDRA_HOME/support/analyzeHeadless" "$@"

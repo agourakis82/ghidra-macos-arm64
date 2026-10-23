@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# Analyze a directory of binaries with Ghidra headless and summarize the inventory.
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+GHIDRA_HEADLESS="${GHIDRA_HEADLESS:-$SCRIPT_DIR/ghidra-headless}"
+SCRIPT_PATH="${GHIDRA_SCRIPT_PATH:-$SCRIPT_DIR/ghidra_scripts}"
+PROJECT_DIR="${GHIDRA_PROJECT_DIR:-$HOME/ghidra-projects}"
+PROJECT_NAME="${GHIDRA_PROJECT_NAME:-ReBatch}"
+
+usage() {
+	cat <<'EOF'
+Usage: ghidra-analyze-dir [-r] [-n project_name] [-o output_dir] <directory>
+
+Import every detected binary in <directory>, run HeadlessInventory.java, and
+write SUMMARY.txt next to the per-file inventory.
+
+  -r    descend into subdirectories
+  -n    Ghidra project name (default: ReBatch)
+  -o    output directory (default: ~/ghidra-out/<dir>-<timestamp>)
+
+Detected formats: Mach-O, ELF, and PE. Other files are listed as skipped.
+EOF
+}
+
+recursive=0
+output_dir=""
+
+while getopts ":rn:o:h" opt; do
+	case "$opt" in
+		r) recursive=1 ;;
+		n) PROJECT_NAME="$OPTARG" ;;
+		o) output_dir="$OPTARG" ;;
+		h) usage; exit 0 ;;
+		*) usage >&2; exit 2 ;;
+	esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -ne 1 ]]; then
+	usage >&2
+	exit 2
+fi
+
+input_dir=$(cd "$1" && pwd)
+stamp=$(date +%Y%m%d-%H%M%S)
+base_name=$(basename "$input_dir")
+if [[ -z "$output_dir" ]]; then
+	output_dir="$HOME/ghidra-out/${base_name}-${stamp}"
+fi
+mkdir -p "$output_dir" "$PROJECT_DIR"
+
+if [[ ! -x "$GHIDRA_HEADLESS" ]]; then
+	echo "headless launcher not executable: $GHIDRA_HEADLESS" >&2
+	exit 1
+fi
+if [[ ! -f "$SCRIPT_PATH/HeadlessInventory.java" ]]; then
+	echo "missing $SCRIPT_PATH/HeadlessInventory.java" >&2
+	exit 1
+fi
+
+is_binary() {
+	local desc
+	desc=$(file -b "$1")
+	case "$desc" in
+		Mach-O*|ELF*|PE32*|MS-DOS*|DOS\ executable*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+files=()
+skipped=()
+find_args=(-type f)
+if [[ "$recursive" -eq 0 ]]; then
+	find_args=(-maxdepth 1 -type f)
+fi
+
+while IFS= read -r -d '' path; do
+	if is_binary "$path"; then
+		files+=("$path")
+	else
+		skipped+=("$(basename "$path")")
+	fi
+done < <(find "$input_dir" "${find_args[@]}" -print0)
+
+if [[ ${#files[@]} -eq 0 ]]; then
+	echo "no binaries found in $input_dir" >&2
+	exit 1
+fi
+
+echo "Analyzing ${#files[@]} binary(ies) from $input_dir"
+echo "Output: $output_dir"
+printf '  %s\n' "${files[@]}"
+
+set +e
+"$GHIDRA_HEADLESS" \
+	"$PROJECT_DIR" "$PROJECT_NAME" \
+	-import "${files[@]}" \
+	-overwrite \
+	-scriptPath "$SCRIPT_PATH" \
+	-postScript HeadlessInventory.java "$output_dir" \
+	-log "$output_dir/analyze.log"
+ghidra_status=$?
+set -e
+
+summary="$output_dir/SUMMARY.txt"
+{
+	echo "Ghidra batch summary"
+	echo "input:   $input_dir"
+	echo "project: $PROJECT_DIR/$PROJECT_NAME"
+	echo "status:  $ghidra_status"
+	echo "when:    $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	echo
+	printf '%-28s %10s %10s %10s\n' "binary" "functions" "imports" "strings"
+	printf '%-28s %10s %10s %10s\n' "------" "---------" "-------" "-------"
+
+	total_functions=0
+	total_imports=0
+	total_strings=0
+	reported=0
+
+	shopt -s nullglob
+	for functions_file in "$output_dir"/*.functions.txt; do
+		name=$(basename "$functions_file" .functions.txt)
+		imports_file="$output_dir/$name.imports.txt"
+		strings_file="$output_dir/$name.strings.txt"
+		fn=$(wc -l < "$functions_file" | tr -d ' ')
+		im=0
+		st=0
+		[[ -f "$imports_file" ]] && im=$(wc -l < "$imports_file" | tr -d ' ')
+		[[ -f "$strings_file" ]] && st=$(wc -l < "$strings_file" | tr -d ' ')
+		printf '%-28s %10s %10s %10s\n' "$name" "$fn" "$im" "$st"
+		total_functions=$((total_functions + fn))
+		total_imports=$((total_imports + im))
+		total_strings=$((total_strings + st))
+		reported=$((reported + 1))
+	done
+
+	echo
+	echo "binaries imported: $reported / ${#files[@]}"
+	echo "functions:         $total_functions"
+	echo "imports:           $total_imports"
+	echo "strings:           $total_strings"
+
+	if [[ ${#skipped[@]} -gt 0 ]]; then
+		echo
+		echo "skipped non-binaries:"
+		printf '  %s\n' "${skipped[@]}"
+	fi
+
+	echo
+	echo "top imports:"
+	if compgen -G "$output_dir/*.imports.txt" > /dev/null; then
+		awk -F '\t' 'NF >= 2 { print $1 "\t" $2 }' "$output_dir"/*.imports.txt \
+			| sort | uniq -c | sort -nr | head -15 \
+			| sed 's/^/  /'
+	else
+		echo "  (none)"
+	fi
+} > "$summary"
+
+echo
+echo "Summary: $summary"
+cat "$summary"
+
+if [[ "$ghidra_status" -ne 0 ]]; then
+	echo "analyzeHeadless exited $ghidra_status; see $output_dir/analyze.log" >&2
+	exit "$ghidra_status"
+fi

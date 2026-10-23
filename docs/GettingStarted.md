@@ -295,6 +295,10 @@ Ghidra is traditionally run in GUI mode. However, it is also capable of running 
 mode using the command line. For more information, see the
 `<GhidraInstallDir>/support/analyzeHeadlessREADME.html` file.
 
+This macOS arm64 tree also includes `scripts/ghidra-analyze-dir`, which imports a directory of
+binaries and writes an inventory summary. Usage is in
+[`docs/headless-batch.md`](headless-batch.md).
+
 ### Single Jar Mode
 Normally, Ghidra is installed as an entire directory structure that allows modular inclusion or
 removal of feature sets and also provides many files that can be extended or configured. However,
